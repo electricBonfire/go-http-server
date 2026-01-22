@@ -42,7 +42,7 @@ func getLinesChannel(f io.ReadCloser) <-chan string {
 }
 
 func main() {
-	listener, err := net.Listen("tcp", ":4200")
+	listener, err := net.Listen("tcp", ":42069")
 	if err != nil {
 		log.Fatal("error: ", err)
 	}
