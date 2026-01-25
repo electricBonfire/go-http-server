@@ -1,15 +1,18 @@
 package request
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"unicode"
 )
 
+type parserState string
+
 type Request struct {
 	RequestLine RequestLine
+	state       parserState
 }
 
 type RequestLine struct {
@@ -18,8 +21,13 @@ type RequestLine struct {
 	Method        string
 }
 
+const (
+	StateInit parserState = "init"
+	StateDone parserState = "done"
+)
+
 var ERROR_BAD_REQUEST = fmt.Errorf("bad request")
-var SEPARATOR = "\r\n"
+var SEPARATOR = []byte("\r\n")
 
 func isUpper(s string) bool {
 	for _, r := range s {
@@ -34,42 +42,89 @@ func (r *RequestLine) ValidHTTP() bool {
 	return r.HttpVersion == "HTTP/1.1"
 }
 
-func parseRequestLine(line string) (*RequestLine, error) {
-	parts := strings.Split(line, " ")
-	if len(parts) != 3 {
-		return nil, errors.Join(ERROR_BAD_REQUEST, fmt.Errorf("Not enough part to the request-line"))
+func parseRequestLine(b []byte) (*RequestLine, int, error) {
+	index := bytes.Index(b, SEPARATOR)
+	if index == -1 {
+		return nil, 0, nil
 	}
 
-	httpParts := strings.Split(parts[2], "/")
-	if len(httpParts) != 2 || httpParts[0] != "HTTP" || httpParts[1] != "1.1" {
-		return nil, errors.Join(ERROR_BAD_REQUEST, fmt.Errorf("Invalid HttpVersion"))
+	line := b[:index]
+	read := index + len(SEPARATOR)
+
+	parts := bytes.Split(line, []byte(" "))
+	if len(parts) != 3 {
+		return nil, index, errors.Join(ERROR_BAD_REQUEST, fmt.Errorf("Not enough part to the request-line"))
+	}
+
+	httpParts := bytes.Split(parts[2], []byte("/"))
+	if len(httpParts) != 2 || string(httpParts[0]) != "HTTP" || string(httpParts[1]) != "1.1" {
+		return nil, index, errors.Join(ERROR_BAD_REQUEST, fmt.Errorf("Invalid HttpVersion"))
 	}
 
 	return &RequestLine{
-		Method:        parts[0],
-		RequestTarget: parts[1],
-		HttpVersion:   httpParts[1],
-	}, nil
+		Method:        string(parts[0]),
+		RequestTarget: string(parts[1]),
+		HttpVersion:   string(httpParts[1]),
+	}, read, nil
 
 }
 
-func RequestFromReader(reader io.Reader) (*Request, error) {
-	data, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("Error with io.ReadAll"), err)
-	}
-	request := string(data)
-	index := strings.Index(request, "\r\n")
-	if index == -1 {
-		return nil, ERROR_BAD_REQUEST
-	}
+func (r *Request) parse(data []byte) (int, error) {
+	read := 0
+outer:
+	for {
+		switch r.state {
+		case StateInit:
+			rl, n, err := parseRequestLine(data[read:])
+			if err != nil {
+				return 0, err
+			}
+			if n == 0 {
+				break outer
+			}
 
-	rl, err := parseRequestLine(request[:index])
-	if err != nil {
-		return nil, err
-	}
+			r.RequestLine = *rl
+			read += n
 
+			r.state = StateDone
+
+		case StateDone:
+			break outer
+		}
+	}
+	return read, nil
+}
+
+func (r *Request) isDone() bool {
+	return r.state == StateDone
+}
+
+func newRequest() *Request {
 	return &Request{
-		RequestLine: *rl,
-	}, err
+		state: StateInit,
+	}
+}
+
+func RequestFromReader(reader io.Reader) (*Request, error) {
+	request := newRequest()
+
+	buf := make([]byte, 1024)
+	bufLen := 0
+
+	for !request.isDone() {
+		n, err := reader.Read(buf[bufLen:])
+		if err != nil {
+			// TODO: How do we want to handle errors?
+			return nil, err
+		}
+		bufLen += n
+		readN, err := request.parse(buf[:bufLen])
+		if err != nil {
+			return nil, err
+		}
+
+		copy(buf, buf[readN:bufLen])
+	}
+
+	return request, nil
 }
